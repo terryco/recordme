@@ -1,0 +1,345 @@
+<ui:FluentWindow x:Class="RecordMe.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        xmlns:conv="clr-namespace:RecordMe.Converters"
+        Title="RecordMe" Height="800" Width="1200"
+        WindowStartupLocation="CenterScreen"
+        ExtendsContentIntoTitleBar="True"
+        WindowBackdropType="Mica"
+        Icon="pack://application:,,,/record.ico">
+
+    <ui:FluentWindow.Resources>
+        <conv:BoolToVisibilityConverter x:Key="BoolToVis"/>
+        <conv:InverseBoolConverter x:Key="InverseBool"/>
+        <conv:RecordingStateToBrushConverter x:Key="StateToBrush"/>
+        <conv:LevelToWidthConverter x:Key="LevelToWidth"/>
+        <conv:TimeSpanToStringConverter x:Key="TimeSpanToStr"/>
+        <conv:NullToVisibilityConverter x:Key="NullToVis"/>
+        <conv:BoolToMonitoringTextConverter x:Key="BoolToMonText"/>
+        <conv:BoolToPlayPauseTextConverter x:Key="BoolToPlayText"/>
+        <conv:NullToVisibilityInverseConverter x:Key="NullToVisInverse"/>
+    </ui:FluentWindow.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Title Bar -->
+        <ui:TitleBar Grid.Row="0" Title="RecordMe" ShowMaximize="True" ShowMinimize="True"/>
+
+        <!-- Main Content -->
+        <Grid Grid.Row="1" Margin="16,8,16,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="350"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Left Panel: Monitoring + Recording List -->
+            <Grid Grid.Column="0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- Monitoring Controls -->
+                <ui:Card Grid.Row="0" Margin="0,0,8,8">
+                    <StackPanel>
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="MIDI Monitor" FontWeight="SemiBold" FontSize="16" VerticalAlignment="Center"/>
+                            <ui:Button Grid.Column="1"
+                                       Content="{Binding IsMonitoring, Converter={StaticResource BoolToMonText}}"
+                                       Command="{Binding ToggleMonitoringCommand}"/>
+                        </Grid>
+
+                        <!-- Recording State Indicator (click during Tailing to finalize) -->
+                        <Button Command="{Binding ForceFinalizeCommand}" Cursor="Hand"
+                                HorizontalAlignment="Left" Margin="0,0,0,8"
+                                ToolTip="Click while tailing to stop and save recording">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border CornerRadius="4" Padding="8,4"
+                                            Background="{Binding RecordingState, Converter={StaticResource StateToBrush}}">
+                                        <StackPanel Orientation="Horizontal">
+                                            <Grid Width="12" Height="12" Margin="0,0,6,0">
+                                                <Ellipse Width="12" Height="12" Fill="White"/>
+                                                <Ellipse x:Name="RecordDot" Width="10" Height="10" Fill="#dc2626"
+                                                         HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                    <Ellipse.Style>
+                                                        <Style TargetType="Ellipse">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding RecordingState}" Value="Recording">
+                                                                    <DataTrigger.EnterActions>
+                                                                        <BeginStoryboard>
+                                                                            <Storyboard RepeatBehavior="Forever">
+                                                                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                                                                 From="1" To="0.3" Duration="0:0:0.6"
+                                                                                                 AutoReverse="True"/>
+                                                                            </Storyboard>
+                                                                        </BeginStoryboard>
+                                                                    </DataTrigger.EnterActions>
+                                                                    <DataTrigger.ExitActions>
+                                                                        <BeginStoryboard>
+                                                                            <Storyboard>
+                                                                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                                                                 To="1" Duration="0:0:0.2"/>
+                                                                            </Storyboard>
+                                                                        </BeginStoryboard>
+                                                                    </DataTrigger.ExitActions>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Ellipse.Style>
+                                                </Ellipse>
+                                            </Grid>
+                                            <TextBlock Text="{Binding RecordingState}" Foreground="White" FontWeight="Medium"/>
+                                        </StackPanel>
+                                    </Border>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+
+                        <!-- Audio Level -->
+                        <TextBlock Text="Audio Level" FontSize="11" Opacity="0.6" Margin="0,0,0,2"/>
+                        <Border Background="#1a1a2e" CornerRadius="3" Height="6" Margin="0,0,0,8">
+                            <Border Background="#22c55e" CornerRadius="3" HorizontalAlignment="Left"
+                                    Width="{Binding AudioLevel, Converter={StaticResource LevelToWidth}}"/>
+                        </Border>
+
+                        <!-- Active Notes -->
+                        <TextBlock FontSize="12" Opacity="0.7">
+                            <Run Text="Active MIDI Notes: "/>
+                            <Run Text="{Binding ActiveNoteCount, Mode=OneWay}"/>
+                        </TextBlock>
+
+                        <CheckBox Content="Auto-trim silence" IsChecked="{Binding AutoTrimSilence}"
+                                  Margin="0,4,0,0" FontSize="12"
+                                  ToolTip="Trim silent sections from the beginning and end of recordings"/>
+                    </StackPanel>
+                </ui:Card>
+
+                <!-- Settings Card -->
+                <ui:Card Grid.Row="1" Margin="0,0,8,8">
+                    <StackPanel>
+                        <!-- Audio Device -->
+                        <TextBlock Text="Audio Device" FontSize="11" Opacity="0.6" Margin="0,0,0,2"/>
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ComboBox ItemsSource="{Binding AudioDevices}"
+                                      SelectedItem="{Binding SelectedAudioDevice}"
+                                      FontSize="11"/>
+                            <ui:Button Grid.Column="1" Content="&#xE72C;" Margin="4,0,0,0"
+                                       Command="{Binding RefreshAudioDevicesCommand}"
+                                       ToolTip="Refresh device list"
+                                       Appearance="Secondary" FontSize="11" Padding="6,2"/>
+                        </Grid>
+
+                        <!-- Recording Location -->
+                        <TextBlock Text="Save to" FontSize="11" Opacity="0.6" Margin="0,0,0,2"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding RecordingLocation}" FontSize="11" Opacity="0.5"
+                                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                       ToolTip="{Binding RecordingLocation}"/>
+                            <ui:Button Grid.Column="1" Content="Browse" Margin="4,0,0,0"
+                                       Command="{Binding BrowseRecordingLocationCommand}"
+                                       Appearance="Secondary" FontSize="11" Padding="8,2"/>
+                        </Grid>
+                    </StackPanel>
+                </ui:Card>
+
+                <!-- Search / Filter -->
+                <ui:Card Grid.Row="2" Margin="0,0,8,8">
+                    <StackPanel>
+                        <ui:TextBox PlaceholderText="Search recordings..." Margin="0,0,0,6"
+                                    Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
+                                    Icon="{ui:SymbolIcon Search24}"/>
+                        <CheckBox Content="Follow-up only" IsChecked="{Binding FilterFollowUp}"/>
+                    </StackPanel>
+                </ui:Card>
+
+                <!-- Recording List -->
+                <ui:Card Grid.Row="3" Margin="0,0,8,0">
+                    <ListBox ItemsSource="{Binding Recordings}"
+                             SelectedItem="{Binding SelectedRecording}"
+                             Background="Transparent" BorderThickness="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="4">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Row="0" Text="{Binding Title}" FontWeight="Medium" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock Grid.Row="0" Grid.Column="1" Text="*" Foreground="#eab308" FontWeight="Bold"
+                                               Visibility="{Binding FollowUp, Converter={StaticResource BoolToVis}}"/>
+                                    <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal">
+                                        <TextBlock Text="{Binding CreatedAt, StringFormat='{}{0:MMM dd, yyyy HH:mm}'}" FontSize="11" Opacity="0.5" Margin="0,0,12,0"/>
+                                        <TextBlock Text="{Binding Duration, Converter={StaticResource TimeSpanToStr}}" FontSize="11" Opacity="0.5"/>
+                                    </StackPanel>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </ui:Card>
+            </Grid>
+
+            <!-- Right Panel: Detail / Edit -->
+            <Grid Grid.Column="1" Visibility="{Binding SelectedRecording, Converter={StaticResource NullToVis}}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Playback Controls -->
+                <ui:Card Grid.Row="0" Margin="0,0,0,8">
+                    <StackPanel>
+                        <TextBlock Text="Playback" FontWeight="SemiBold" FontSize="16" Margin="0,0,0,8"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Progress -->
+                            <StackPanel>
+                                <ProgressBar Value="{Binding PlaybackProgress}" Maximum="1" Height="4" Margin="0,0,0,4"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="{Binding PlaybackPosition}" FontSize="11" Opacity="0.6" Margin="0,0,4,0"/>
+                                    <TextBlock Text="/" FontSize="11" Opacity="0.4" Margin="0,0,4,0"/>
+                                    <TextBlock Text="{Binding PlaybackDuration}" FontSize="11" Opacity="0.6"/>
+                                </StackPanel>
+                            </StackPanel>
+
+                            <!-- Buttons -->
+                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                <ui:Button Content="{Binding IsPlayingAudio, Converter={StaticResource BoolToPlayText}, ConverterParameter=WAV}"
+                                           Command="{Binding PlayAudioCommand}" Margin="0,0,4,0"
+                                           Appearance="Primary"
+                                           ToolTip="Play/Stop WAV audio"/>
+                                <ui:Button Content="{Binding IsPlayingMidi, Converter={StaticResource BoolToPlayText}, ConverterParameter=MIDI}"
+                                           Command="{Binding PlayMidiCommand}" Margin="0,0,4,0"
+                                           ToolTip="Play/Stop MIDI playback out to MIDI device"/>
+                                <ui:Button Content="Recapture"
+                                           Command="{Binding RecaptureAudioCommand}"
+                                           ToolTip="Play MIDI through remapped channels and record new audio"/>
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+                </ui:Card>
+
+                <!-- MIDI Channel Remapping -->
+                <ui:Card Grid.Row="1" Margin="0,0,0,8">
+                    <Expander Header="MIDI Channel Remapping" IsExpanded="False">
+                        <ItemsControl ItemsSource="{Binding ChannelMappings}" Margin="0,8,0,0">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Orientation="Horizontal" Margin="0,2,16,2">
+                                        <TextBlock Text="{Binding FromChannel, StringFormat='Ch {0} →'}"
+                                                   VerticalAlignment="Center" FontSize="12" Width="50" Margin="0,0,4,0"/>
+                                        <ui:NumberBox Value="{Binding ToChannel, Mode=TwoWay}"
+                                                      Minimum="1" Maximum="16" Width="70"
+                                                      SpinButtonPlacementMode="Compact"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </Expander>
+                </ui:Card>
+
+                <!-- Recording Details -->
+                <ui:Card Grid.Row="2" Margin="0,0,0,8">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel>
+                            <TextBlock Text="Recording Details" FontWeight="SemiBold" FontSize="16" Margin="0,0,0,12"/>
+
+                            <TextBlock Text="Title" FontSize="12" Opacity="0.6" Margin="0,0,0,4"/>
+                            <ui:TextBox Text="{Binding EditTitle, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12"/>
+
+                            <Grid Margin="0,0,0,12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Margin="0,0,4,0">
+                                    <TextBlock Text="Instruments" FontSize="12" Opacity="0.6" Margin="0,0,0,4"/>
+                                    <ui:TextBox Text="{Binding EditInstruments, UpdateSourceTrigger=PropertyChanged}"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Margin="4,0,0,0">
+                                    <TextBlock Text="Patches" FontSize="12" Opacity="0.6" Margin="0,0,0,4"/>
+                                    <ui:TextBox Text="{Binding EditPatches, UpdateSourceTrigger=PropertyChanged}"/>
+                                </StackPanel>
+                            </Grid>
+
+                            <Grid Margin="0,0,0,12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Margin="0,0,4,0">
+                                    <TextBlock Text="Key" FontSize="12" Opacity="0.6" Margin="0,0,0,4"/>
+                                    <ui:TextBox Text="{Binding EditKey, UpdateSourceTrigger=PropertyChanged}"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Margin="4,0,0,0">
+                                    <TextBlock Text="FX Information" FontSize="12" Opacity="0.6" Margin="0,0,0,4"/>
+                                    <ui:TextBox Text="{Binding EditFxInfo, UpdateSourceTrigger=PropertyChanged}"/>
+                                </StackPanel>
+                            </Grid>
+
+                            <TextBlock Text="Notes" FontSize="12" Opacity="0.6" Margin="0,0,0,4"/>
+                            <ui:TextBox Text="{Binding EditNotes, UpdateSourceTrigger=PropertyChanged}"
+                                        AcceptsReturn="True" TextWrapping="Wrap"
+                                        MinHeight="80" MaxHeight="200" Margin="0,0,0,12"/>
+
+                            <CheckBox Content="Flag for follow-up" IsChecked="{Binding EditFollowUp}" FontSize="13"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </ui:Card>
+
+                <!-- Action Buttons -->
+                <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <ui:Button Content="Delete" Command="{Binding DeleteRecordingCommand}" Appearance="Danger" Margin="0,0,8,0"/>
+                    <ui:Button Content="Save" Command="{Binding SaveRecordingCommand}" Appearance="Primary"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- Empty State -->
+            <TextBlock Grid.Column="1" Text="Select a recording to view details"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       Opacity="0.4" FontSize="16"
+                       Visibility="{Binding SelectedRecording, Converter={StaticResource NullToVisInverse}}"/>
+        </Grid>
+
+        <!-- Status Bar -->
+        <Border Grid.Row="2" Background="#0a0a0a" Padding="16,6">
+            <TextBlock Text="{Binding StatusText}" FontSize="12" Opacity="0.7"/>
+        </Border>
+    </Grid>
+</ui:FluentWindow>
