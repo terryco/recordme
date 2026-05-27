@@ -87,7 +87,6 @@ public static class WavTrimmer
             writer.Write(buffer, 0, buffer.Length);
         }
 
-        File.Delete(wavFilePath);
-        File.Move(tempPath, wavFilePath);
+        File.Move(tempPath, wavFilePath, overwrite: true);
     }
 }

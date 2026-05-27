@@ -9,6 +9,12 @@ public class AppSettings
     public string RecordingOutputDir { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.MyMusic), "RecordMe");
 
+    public bool RecordStereoOnly { get; set; }
+
+    // First channel of the stereo pair (0-indexed) to capture when stereo-only is on
+    // and the source has more than 2 channels.
+    public int SelectedChannelPair { get; set; }
+
     private static readonly string SettingsPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "RecordMe", "settings.json");

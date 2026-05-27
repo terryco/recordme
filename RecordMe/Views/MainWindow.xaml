@@ -108,12 +108,28 @@
                             </Button.Template>
                         </Button>
 
-                        <!-- Audio Level -->
+                        <!-- Audio Level (stereo, reflects selected channel pair) -->
                         <TextBlock Text="Audio Level" FontSize="11" Opacity="0.6" Margin="0,0,0,2"/>
-                        <Border Background="#1a1a2e" CornerRadius="3" Height="6" Margin="0,0,0,8">
-                            <Border Background="#22c55e" CornerRadius="3" HorizontalAlignment="Left"
-                                    Width="{Binding AudioLevel, Converter={StaticResource LevelToWidth}}"/>
-                        </Border>
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="14"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="L" FontSize="10" Opacity="0.6" VerticalAlignment="Center"/>
+                            <Border Grid.Row="0" Grid.Column="1" Background="#1a1a2e" CornerRadius="3" Height="6" Margin="0,0,0,2">
+                                <Border Background="#22c55e" CornerRadius="3" HorizontalAlignment="Left"
+                                        Width="{Binding AudioLevelLeft, Converter={StaticResource LevelToWidth}}"/>
+                            </Border>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="R" FontSize="10" Opacity="0.6" VerticalAlignment="Center"/>
+                            <Border Grid.Row="1" Grid.Column="1" Background="#1a1a2e" CornerRadius="3" Height="6">
+                                <Border Background="#22c55e" CornerRadius="3" HorizontalAlignment="Left"
+                                        Width="{Binding AudioLevelRight, Converter={StaticResource LevelToWidth}}"/>
+                            </Border>
+                        </Grid>
 
                         <!-- Active Notes -->
                         <TextBlock FontSize="12" Opacity="0.7">
@@ -124,6 +140,10 @@
                         <CheckBox Content="Auto-trim silence" IsChecked="{Binding AutoTrimSilence}"
                                   Margin="0,4,0,0" FontSize="12"
                                   ToolTip="Trim silent sections from the beginning and end of recordings"/>
+
+                        <CheckBox Content="Record stereo only" IsChecked="{Binding RecordStereoOnly}"
+                                  Margin="0,4,0,0" FontSize="12"
+                                  ToolTip="Record only the selected stereo channel pair instead of all channels"/>
                     </StackPanel>
                 </ui:Card>
 
@@ -145,6 +165,16 @@
                                        ToolTip="Refresh device list"
                                        Appearance="Secondary" FontSize="11" Padding="6,2"/>
                         </Grid>
+
+                        <!-- Stereo Channel Pair (only shown for multichannel devices) -->
+                        <StackPanel Visibility="{Binding IsMultichannelDevice, Converter={StaticResource BoolToVis}}"
+                                    Margin="0,0,0,8">
+                            <TextBlock Text="Stereo channel pair" FontSize="11" Opacity="0.6" Margin="0,0,0,2"/>
+                            <ComboBox ItemsSource="{Binding AvailableStereoPairs}"
+                                      SelectedItem="{Binding SelectedStereoPair}"
+                                      FontSize="11"
+                                      ToolTip="Which two channels to capture when 'Record stereo only' is on"/>
+                        </StackPanel>
 
                         <!-- Recording Location -->
                         <TextBlock Text="Save to" FontSize="11" Opacity="0.6" Margin="0,0,0,2"/>

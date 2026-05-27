@@ -1,13 +1,23 @@
+using NAudio.CoreAudioApi;
+using NAudio.MediaFoundation;
 using NAudio.Wave;
 using System;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace RecordMe.Services;
 
 public class PlaybackService : IDisposable
 {
-    private WaveOutEvent? _waveOut;
+    private IWavePlayer? _waveOut;
     private WaveStream? _reader;
+    private IDisposable? _resampler;
+    private readonly object _lock = new();
+
+    static PlaybackService()
+    {
+        try { MediaFoundationApi.Startup(); } catch { }
+    }
 
     public bool IsPlaying => _waveOut?.PlaybackState == PlaybackState.Playing;
     public TimeSpan CurrentPosition => _reader?.CurrentTime ?? TimeSpan.Zero;
@@ -35,27 +45,32 @@ public class PlaybackService : IDisposable
                 _reader = new WaveFileReader(wavFilePath);
             }
 
-            _waveOut = new WaveOutEvent();
+            // Get device's mix format — WASAPI shared mode requires the input to match it.
+            var enumerator = new MMDeviceEnumerator();
+            using var device = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Console);
+            var deviceFormat = device.AudioClient.MixFormat;
 
-            // If the reader format isn't directly playable, convert it
-            if (_reader.WaveFormat.Encoding != WaveFormatEncoding.IeeeFloat &&
-                _reader.WaveFormat.Encoding != WaveFormatEncoding.Pcm)
+            // AudioFileReader is already an ISampleProvider (32-bit float). Fall back to
+            // ToSampleProvider() for plain WaveFileReader. For multichannel files
+            // (e.g. 14-ch from a Zoom L-6 Max), downmix to stereo first —
+            // MediaFoundationResampler can't reliably handle very high channel counts.
+            ISampleProvider sampleSource = _reader as ISampleProvider ?? _reader.ToSampleProvider();
+            if (sampleSource.WaveFormat.Channels > 2)
             {
-                var converted = new WaveFormatConversionStream(
-                    new WaveFormat(_reader.WaveFormat.SampleRate, 16, _reader.WaveFormat.Channels),
-                    _reader);
-                _waveOut.Init(converted);
-            }
-            else
-            {
-                _waveOut.Init(_reader);
+                sampleSource = new StereoDownmixSampleProvider(sampleSource);
             }
 
-            _waveOut.PlaybackStopped += (s, e) =>
+            IWaveProvider source = sampleSource.ToWaveProvider();
+            if (!FormatsMatch(source.WaveFormat, deviceFormat))
             {
-                _positionTimer?.Dispose();
-                PlaybackStopped?.Invoke(this, EventArgs.Empty);
-            };
+                var resampler = new MediaFoundationResampler(source, deviceFormat) { ResamplerQuality = 60 };
+                _resampler = resampler;
+                source = resampler;
+            }
+
+            _waveOut = new WasapiOut(AudioClientShareMode.Shared, 100);
+            _waveOut.Init(source);
+            _waveOut.PlaybackStopped += OnWaveOutStopped;
 
             _positionTimer = new Timer(_ =>
             {
@@ -76,6 +91,45 @@ public class PlaybackService : IDisposable
         }
     }
 
+    private static bool FormatsMatch(WaveFormat a, WaveFormat b)
+    {
+        return a.SampleRate == b.SampleRate
+            && a.Channels == b.Channels
+            && a.BitsPerSample == b.BitsPerSample
+            && a.Encoding == b.Encoding;
+    }
+
+    private void OnWaveOutStopped(object? sender, StoppedEventArgs e)
+    {
+        IWavePlayer? waveOut;
+        WaveStream? reader;
+        IDisposable? resampler;
+        Timer? timer;
+
+        lock (_lock)
+        {
+            timer = _positionTimer;
+            _positionTimer = null;
+            waveOut = _waveOut;
+            _waveOut = null;
+            reader = _reader;
+            _reader = null;
+            resampler = _resampler;
+            _resampler = null;
+        }
+
+        timer?.Dispose();
+
+        Task.Run(() =>
+        {
+            resampler?.Dispose();
+            reader?.Dispose();
+            waveOut?.Dispose();
+        });
+
+        PlaybackStopped?.Invoke(this, EventArgs.Empty);
+    }
+
     public void Pause()
     {
         _waveOut?.Pause();
@@ -88,13 +142,34 @@ public class PlaybackService : IDisposable
 
     public void Stop()
     {
-        _positionTimer?.Dispose();
-        _positionTimer = null;
-        _waveOut?.Stop();
-        _waveOut?.Dispose();
-        _waveOut = null;
-        _reader?.Dispose();
-        _reader = null;
+        IWavePlayer? waveOut;
+        WaveStream? reader;
+        IDisposable? resampler;
+        Timer? timer;
+
+        lock (_lock)
+        {
+            timer = _positionTimer;
+            _positionTimer = null;
+            waveOut = _waveOut;
+            _waveOut = null;
+            reader = _reader;
+            _reader = null;
+            resampler = _resampler;
+            _resampler = null;
+        }
+
+        timer?.Dispose();
+
+        if (waveOut != null)
+        {
+            waveOut.PlaybackStopped -= OnWaveOutStopped;
+            try { waveOut.Stop(); } catch { }
+            waveOut.Dispose();
+        }
+
+        resampler?.Dispose();
+        reader?.Dispose();
     }
 
     public void Seek(TimeSpan position)
@@ -106,5 +181,50 @@ public class PlaybackService : IDisposable
     public void Dispose()
     {
         Stop();
+    }
+}
+
+// Sums all source channels into a stereo pair. Each output channel receives the average
+// of all source channels — this preserves any signal regardless of which channel(s) it's on.
+internal class StereoDownmixSampleProvider : ISampleProvider
+{
+    private readonly ISampleProvider _source;
+    private readonly int _sourceChannels;
+    private float[] _sourceBuffer = Array.Empty<float>();
+
+    public WaveFormat WaveFormat { get; }
+
+    public StereoDownmixSampleProvider(ISampleProvider source)
+    {
+        _source = source;
+        _sourceChannels = source.WaveFormat.Channels;
+        WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(source.WaveFormat.SampleRate, 2);
+    }
+
+    public int Read(float[] buffer, int offset, int count)
+    {
+        int targetFrames = count / 2;
+        int sourceSamplesNeeded = targetFrames * _sourceChannels;
+
+        if (_sourceBuffer.Length < sourceSamplesNeeded)
+            _sourceBuffer = new float[sourceSamplesNeeded];
+
+        int read = _source.Read(_sourceBuffer, 0, sourceSamplesNeeded);
+        int framesRead = read / _sourceChannels;
+
+        float scale = 1f / _sourceChannels;
+        for (int frame = 0; frame < framesRead; frame++)
+        {
+            float sum = 0f;
+            int baseIdx = frame * _sourceChannels;
+            for (int ch = 0; ch < _sourceChannels; ch++)
+                sum += _sourceBuffer[baseIdx + ch];
+
+            float mono = sum * scale;
+            buffer[offset + frame * 2] = mono;
+            buffer[offset + frame * 2 + 1] = mono;
+        }
+
+        return framesRead * 2;
     }
 }

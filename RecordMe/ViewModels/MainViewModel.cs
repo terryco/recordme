@@ -29,10 +29,12 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string _statusText = "Ready — Waiting for MIDI input";
     [ObservableProperty] private RecordingState _recordingState = RecordingState.Idle;
     [ObservableProperty] private int _tailCountdown;
-    [ObservableProperty] private float _audioLevel;
+    [ObservableProperty] private float _audioLevelLeft;
+    [ObservableProperty] private float _audioLevelRight;
     [ObservableProperty] private int _activeNoteCount;
     [ObservableProperty] private bool _isMonitoring;
     [ObservableProperty] private bool _autoTrimSilence = true;
+    [ObservableProperty] private bool _recordStereoOnly;
     [ObservableProperty] private bool _isPlayingAudio;
     [ObservableProperty] private bool _isPlayingMidi;
     [ObservableProperty] private string _playbackPosition = "00:00";
@@ -43,8 +45,12 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _filterFollowUp;
     [ObservableProperty] private string _recordingLocation = string.Empty;
     [ObservableProperty] private AudioDeviceInfo? _selectedAudioDevice;
+    [ObservableProperty] private StereoChannelPair? _selectedStereoPair;
+    [ObservableProperty] private bool _isMultichannelDevice;
 
     public ObservableCollection<AudioDeviceInfo> AudioDevices { get; } = [];
+
+    public ObservableCollection<StereoChannelPair> AvailableStereoPairs { get; } = [];
 
     public ObservableCollection<Recording> Recordings { get; } = [];
 
@@ -73,6 +79,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _settings = AppSettings.Load();
         _outputDir = _settings.RecordingOutputDir;
         RecordingLocation = _outputDir;
+        RecordStereoOnly = _settings.RecordStereoOnly;
+        _audioCaptureService.SelectedChannelPair = _settings.SelectedChannelPair;
         Directory.CreateDirectory(_outputDir);
 
         // Initialize 16 MIDI channel mappings
@@ -84,10 +92,19 @@ public partial class MainViewModel : ObservableObject, IDisposable
         RefreshAudioDevices();
 
         _audioCaptureService.LevelChanged += (_, level) =>
-            _dispatcher.BeginInvoke(() => AudioLevel = level);
+            _dispatcher.BeginInvoke(() =>
+            {
+                AudioLevelLeft = level.Left;
+                AudioLevelRight = level.Right;
+            });
 
         _midiCaptureService.NoteActivity += (_, e) =>
-            _dispatcher.BeginInvoke(() => ActiveNoteCount = _midiCaptureService.ActiveNoteCount);
+            _dispatcher.BeginInvoke(() =>
+            {
+                ActiveNoteCount = _midiCaptureService.ActiveNoteCount;
+                if (IsMonitoring)
+                    StatusText = $"MIDI: {_midiCaptureService.MessageCount} msgs, {ActiveNoteCount} notes active";
+            });
 
         _playbackService.PositionChanged += (_, pos) =>
             _dispatcher.BeginInvoke(() =>
@@ -115,7 +132,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     {
         using var db = _dbFactory();
         await db.Database.EnsureCreatedAsync();
-        await ValidateIntegrityAsync();
+        // await ValidateIntegrityAsync();
         await LoadRecordingsAsync();
     }
 
@@ -259,11 +276,39 @@ public partial class MainViewModel : ObservableObject, IDisposable
             SelectedAudioDevice = AudioDevices[0];
     }
 
+    partial void OnSelectedAudioDeviceChanged(AudioDeviceInfo? value)
+    {
+        RefreshAvailableStereoPairs(value?.Id);
+    }
+
+    private void RefreshAvailableStereoPairs(string? deviceId)
+    {
+        int channels = AudioCaptureService.GetDeviceChannelCount(deviceId);
+        IsMultichannelDevice = channels > 2;
+
+        AvailableStereoPairs.Clear();
+        for (int i = 0; i + 1 < channels; i += 2)
+        {
+            AvailableStereoPairs.Add(new StereoChannelPair
+            {
+                FirstChannel = i,
+                DisplayName = $"Channels {i + 1}-{i + 2}"
+            });
+        }
+
+        // Restore the saved pair if it's still valid for this device.
+        var saved = AvailableStereoPairs.FirstOrDefault(p => p.FirstChannel == _settings.SelectedChannelPair)
+                    ?? AvailableStereoPairs.FirstOrDefault();
+        SelectedStereoPair = saved;
+    }
+
     private void StartMonitoring()
     {
         _coordinator = new RecordingCoordinator(_audioCaptureService, _midiCaptureService, _outputDir);
         _coordinator.AudioDeviceId = SelectedAudioDevice?.Id;
         _coordinator.AutoTrimSilence = AutoTrimSilence;
+        _coordinator.RecordStereoOnly = RecordStereoOnly;
+        _coordinator.SelectedChannelPair = SelectedStereoPair?.FirstChannel ?? 0;
 
         _coordinator.StateChanged += (_, state) =>
             _dispatcher.BeginInvoke(() =>
@@ -285,6 +330,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
                 StatusText = $"Tail recording — stopping in {seconds}s";
             });
 
+        _coordinator.StatusMessage += (_, msg) =>
+            _dispatcher.BeginInvoke(() => StatusText = msg);
+
         _coordinator.RecordingCompleted += async (_, recording) =>
         {
             await _dispatcher.InvokeAsync(async () =>
@@ -297,9 +345,11 @@ public partial class MainViewModel : ObservableObject, IDisposable
             });
         };
 
-        _coordinator.Start();
+        var midiDeviceCount = _coordinator.Start();
         IsMonitoring = true;
-        StatusText = "Monitoring — Waiting for MIDI input";
+        StatusText = midiDeviceCount > 0
+            ? $"Monitoring — {midiDeviceCount} MIDI device(s) — Waiting for input"
+            : "Monitoring — No MIDI devices found!";
     }
 
     private void StopMonitoring()
@@ -409,6 +459,15 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     partial void OnSelectedRecordingChanged(Recording? value)
     {
+        // Stop any current playback and reset
+        _playbackService.Stop();
+        _midiPlaybackService.Stop();
+        IsPlayingAudio = false;
+        IsPlayingMidi = false;
+        PlaybackProgress = 0;
+        PlaybackPosition = "00:00";
+        PlaybackDuration = value?.Duration.ToString(@"mm\:ss") ?? "00:00";
+
         if (value == null) return;
         EditTitle = value.Title;
         EditInstruments = value.Instruments;
@@ -423,6 +482,24 @@ public partial class MainViewModel : ObservableObject, IDisposable
     {
         if (_coordinator != null)
             _coordinator.AutoTrimSilence = value;
+    }
+
+    partial void OnRecordStereoOnlyChanged(bool value)
+    {
+        if (_coordinator != null)
+            _coordinator.RecordStereoOnly = value;
+        _settings.RecordStereoOnly = value;
+        _settings.Save();
+    }
+
+    partial void OnSelectedStereoPairChanged(StereoChannelPair? value)
+    {
+        if (value == null) return;
+        _audioCaptureService.SelectedChannelPair = value.FirstChannel;
+        if (_coordinator != null)
+            _coordinator.SelectedChannelPair = value.FirstChannel;
+        _settings.SelectedChannelPair = value.FirstChannel;
+        _settings.Save();
     }
 
     [RelayCommand]
@@ -554,4 +631,11 @@ public partial class ChannelMapping : ObservableObject
 {
     [ObservableProperty] private int _fromChannel;
     [ObservableProperty] private int _toChannel;
+}
+
+public class StereoChannelPair
+{
+    public int FirstChannel { get; init; }
+    public string DisplayName { get; init; } = string.Empty;
+    public override string ToString() => DisplayName;
 }

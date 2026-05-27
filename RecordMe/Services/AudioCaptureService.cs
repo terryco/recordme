@@ -14,6 +14,8 @@ public class AudioDeviceInfo
     public override string ToString() => Name;
 }
 
+public readonly record struct StereoLevel(float Left, float Right);
+
 public class AudioCaptureService : IDisposable
 {
     private WasapiCapture? _capture;
@@ -28,8 +30,12 @@ public class AudioCaptureService : IDisposable
 
     public bool IsCapturing { get; private set; }
     public WaveFormat? WaveFormat => _waveFormat;
+    public bool RecordStereoOnly { get; set; }
+    // First channel of the stereo pair to extract when recording stereo-only from a
+    // multichannel device (0 = channels 1-2, 2 = channels 3-4, ...).
+    public int SelectedChannelPair { get; set; }
 
-    public event EventHandler<float>? LevelChanged;
+    public event EventHandler<StereoLevel>? LevelChanged;
 
     public static List<AudioDeviceInfo> GetCaptureDevices()
     {
@@ -64,18 +70,27 @@ public class AudioCaptureService : IDisposable
 
         var enumerator = new MMDeviceEnumerator();
 
-        if (deviceId != null && deviceId.StartsWith("loopback:"))
+        // GetDevice throws COMException 0x80070490 ("Element not found") when the saved
+        // device ID refers to a device that's no longer plugged in — fall back to the default.
+        try
         {
-            var actualId = deviceId["loopback:".Length..];
-            var device = enumerator.GetDevice(actualId);
-            _capture = new WasapiLoopbackCapture(device);
+            if (deviceId != null && deviceId.StartsWith("loopback:"))
+            {
+                var actualId = deviceId["loopback:".Length..];
+                var device = enumerator.GetDevice(actualId);
+                _capture = new WasapiLoopbackCapture(device);
+            }
+            else if (deviceId != null)
+            {
+                var device = enumerator.GetDevice(deviceId);
+                _capture = new WasapiCapture(device);
+            }
+            else
+            {
+                _capture = new WasapiCapture();
+            }
         }
-        else if (deviceId != null)
-        {
-            var device = enumerator.GetDevice(deviceId);
-            _capture = new WasapiCapture(device);
-        }
-        else
+        catch (System.Runtime.InteropServices.COMException)
         {
             _capture = new WasapiCapture();
         }
@@ -108,8 +123,11 @@ public class AudioCaptureService : IDisposable
 
             var fileName = $"recording_{DateTime.Now:yyyyMMdd_HHmmss}_{Environment.TickCount64 & 0xFFFF:X4}.wav";
             var filePath = Path.Combine(outputDir, fileName);
-            // Write the pre-roll buffer first
-            var targetFormat = new WaveFormat(44100, 16, _waveFormat.Channels);
+            // Write the pre-roll buffer first. When stereo-only is on, cap to 2 channels —
+            // ConvertToTarget sums all source channels so the master mix is captured no matter
+            // which input channel(s) it lives on (Zoom L-6 Max routes it past channel 1-2).
+            int targetChannels = RecordStereoOnly ? Math.Min(_waveFormat.Channels, 2) : _waveFormat.Channels;
+            var targetFormat = new WaveFormat(44100, 16, targetChannels);
             _waveWriter = new WaveFileWriter(filePath, targetFormat);
 
             if (_circularBuffer != null)
@@ -117,7 +135,7 @@ public class AudioCaptureService : IDisposable
                 var preRoll = _circularBuffer.ReadAll();
                 if (preRoll.Length > 0)
                 {
-                    var resampled = ConvertToTarget(preRoll, _waveFormat, targetFormat);
+                    var resampled = ProcessForWriter(preRoll, targetFormat);
                     WriteFloatsAsBytes(resampled, targetFormat);
                 }
             }
@@ -143,14 +161,22 @@ public class AudioCaptureService : IDisposable
         // Convert incoming bytes to float samples
         var floats = ConvertBytesToFloats(e.Buffer, e.BytesRecorded, _waveFormat);
 
-        // Calculate level for meter
-        float maxLevel = 0;
-        for (int i = 0; i < floats.Length; i++)
+        // Per-channel peak levels for the selected stereo pair (so the meter reflects
+        // exactly what would be recorded in stereo-only mode).
+        int channels = _waveFormat.Channels;
+        int leftCh = Math.Clamp(SelectedChannelPair, 0, channels - 1);
+        int rightCh = channels > 1 ? Math.Clamp(SelectedChannelPair + 1, 0, channels - 1) : leftCh;
+        float leftPeak = 0, rightPeak = 0;
+        int frames = floats.Length / channels;
+        for (int f = 0; f < frames; f++)
         {
-            var abs = Math.Abs(floats[i]);
-            if (abs > maxLevel) maxLevel = abs;
+            int baseIdx = f * channels;
+            float l = Math.Abs(floats[baseIdx + leftCh]);
+            float r = Math.Abs(floats[baseIdx + rightCh]);
+            if (l > leftPeak) leftPeak = l;
+            if (r > rightPeak) rightPeak = r;
         }
-        LevelChanged?.Invoke(this, maxLevel);
+        LevelChanged?.Invoke(this, new StereoLevel(leftPeak, rightPeak));
 
         // Always write to circular buffer
         _circularBuffer?.Write(floats, 0, floats.Length);
@@ -161,10 +187,28 @@ public class AudioCaptureService : IDisposable
             if (_isRecordingToFile && _waveWriter != null)
             {
                 var targetFormat = _waveWriter.WaveFormat;
-                var resampled = ConvertToTarget(floats, _waveFormat, targetFormat);
+                var resampled = ProcessForWriter(floats, targetFormat);
                 WriteFloatsAsBytes(resampled, targetFormat);
             }
         }
+    }
+
+    // Reduces channels (extracts the selected stereo pair) if needed, then resamples to the
+    // writer's target format.
+    private float[] ProcessForWriter(float[] floats, WaveFormat targetFormat)
+    {
+        if (_waveFormat == null) return floats;
+
+        var sourceFormat = _waveFormat;
+        var processed = floats;
+
+        if (targetFormat.Channels < sourceFormat.Channels)
+        {
+            processed = ExtractChannelPair(processed, sourceFormat.Channels, SelectedChannelPair);
+            sourceFormat = new WaveFormat(sourceFormat.SampleRate, sourceFormat.BitsPerSample, 2);
+        }
+
+        return ConvertToTarget(processed, sourceFormat, targetFormat);
     }
 
     private void WriteFloatsAsBytes(float[] samples, WaveFormat targetFormat)
@@ -263,6 +307,42 @@ public class AudioCaptureService : IDisposable
         }
 
         return output;
+    }
+
+    // Extracts a stereo pair starting at firstChannel from a multichannel float buffer.
+    private static float[] ExtractChannelPair(float[] input, int sourceChannels, int firstChannel)
+    {
+        int frames = input.Length / sourceChannels;
+        var output = new float[frames * 2];
+        int ch0 = Math.Clamp(firstChannel, 0, sourceChannels - 1);
+        int ch1 = Math.Clamp(firstChannel + 1, 0, sourceChannels - 1);
+        for (int f = 0; f < frames; f++)
+        {
+            int baseIdx = f * sourceChannels;
+            output[f * 2] = input[baseIdx + ch0];
+            output[f * 2 + 1] = input[baseIdx + ch1];
+        }
+        return output;
+    }
+
+    public static int GetDeviceChannelCount(string? deviceId)
+    {
+        try
+        {
+            var enumerator = new MMDeviceEnumerator();
+            MMDevice device;
+            if (string.IsNullOrEmpty(deviceId))
+                device = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Console);
+            else if (deviceId.StartsWith("loopback:"))
+                device = enumerator.GetDevice(deviceId["loopback:".Length..]);
+            else
+                device = enumerator.GetDevice(deviceId);
+            return device.AudioClient.MixFormat.Channels;
+        }
+        catch
+        {
+            return 2;
+        }
     }
 
     private void OnRecordingStopped(object? sender, StoppedEventArgs e)

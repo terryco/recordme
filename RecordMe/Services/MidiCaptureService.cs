@@ -27,12 +27,13 @@ public class MidiCaptureService : IDisposable
 
     public bool HasActiveNotes => _activeNotes.Values.Any(set => set.Count > 0);
     public int ActiveNoteCount => _activeNotes.Values.Sum(set => set.Count);
+    public long MessageCount { get; private set; }
 
     public event EventHandler<MidiNoteEventArgs>? NoteActivity;
     public event EventHandler? AllNotesOff;
     public event EventHandler? FirstNoteOn;
 
-    public void StartListening()
+    public int StartListening()
     {
         StopListening();
 
@@ -51,6 +52,8 @@ public class MidiCaptureService : IDisposable
                 // Device may be in use
             }
         }
+
+        return _midiInputs.Count;
     }
 
     public void StopListening()
@@ -97,6 +100,7 @@ public class MidiCaptureService : IDisposable
 
     private void OnMidiMessageReceived(object? sender, MidiInMessageEventArgs e)
     {
+        MessageCount++;
         var message = e.MidiEvent;
 
         // Record all events if recording (except timing/active sensing)

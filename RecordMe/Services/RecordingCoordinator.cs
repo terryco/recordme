@@ -26,15 +26,27 @@ public class RecordingCoordinator : IDisposable
     private string _currentWavPath = string.Empty;
     private string _currentMidiPath = string.Empty;
     private DateTime _recordingStartTime;
+    private bool _finalizing;
 
     private const int TailTimeoutSeconds = 15;
 
     public bool AutoTrimSilence { get; set; } = true;
+    public bool RecordStereoOnly
+    {
+        get => _audio.RecordStereoOnly;
+        set => _audio.RecordStereoOnly = value;
+    }
+    public int SelectedChannelPair
+    {
+        get => _audio.SelectedChannelPair;
+        set => _audio.SelectedChannelPair = value;
+    }
     public RecordingState State => _state;
 
     public event EventHandler<RecordingState>? StateChanged;
     public event EventHandler<Recording>? RecordingCompleted;
     public event EventHandler<int>? TailCountdownTick;
+    public event EventHandler<string>? StatusMessage;
 
     public RecordingCoordinator(AudioCaptureService audio, MidiCaptureService midi, string outputDir)
     {
@@ -51,10 +63,10 @@ public class RecordingCoordinator : IDisposable
 
     public string? AudioDeviceId { get; set; }
 
-    public void Start()
+    public int Start()
     {
         _audio.StartCapturing(AudioDeviceId);
-        _midi.StartListening();
+        return _midi.StartListening();
     }
 
     public void ForceStartRecording()
@@ -168,15 +180,30 @@ public class RecordingCoordinator : IDisposable
 
     private void FinalizeRecording()
     {
+        lock (_stateLock)
+        {
+            if (_state == RecordingState.Idle || _finalizing) return;
+            _finalizing = true;
+        }
+
         _audio.StopWriting();
         _currentMidiPath = _midi.StopRecording(_outputDir);
 
         if (AutoTrimSilence && !string.IsNullOrEmpty(_currentWavPath))
         {
-            try { WavTrimmer.TrimSilence(_currentWavPath); } catch { }
+            try
+            {
+                WavTrimmer.TrimSilence(_currentWavPath);
+            }
+            catch (Exception ex)
+            {
+                StatusMessage?.Invoke(this, $"Silence trim failed: {ex.Message}");
+            }
         }
 
         var duration = DateTime.UtcNow - _recordingStartTime;
+
+        var chordSummary = MidiChordAnalyzer.Analyze(_currentMidiPath);
 
         var recording = new Recording
         {
@@ -185,11 +212,13 @@ public class RecordingCoordinator : IDisposable
             Duration = duration,
             WavFilePath = _currentWavPath,
             MidiFilePath = _currentMidiPath,
+            Notes = chordSummary,
             SampleRate = _audio.WaveFormat?.SampleRate ?? 44100,
             Channels = _audio.WaveFormat?.Channels ?? 2,
             BitsPerSample = 16
         };
 
+        lock (_stateLock) { _finalizing = false; }
         SetState(RecordingState.Idle);
         RecordingCompleted?.Invoke(this, recording);
     }
@@ -210,5 +239,9 @@ public class RecordingCoordinator : IDisposable
         Stop();
         CancelTail();
         _tailCts?.Dispose();
+
+        _midi.FirstNoteOn -= OnFirstNoteOn;
+        _midi.AllNotesOff -= OnAllNotesOff;
+        _midi.NoteActivity -= OnNoteActivity;
     }
 }
